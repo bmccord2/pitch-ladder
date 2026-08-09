@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0B0E22">
+<title>Pitch Ladder</title>
+<style>
+  :root{
+    --ink:#0B0E22;
+    --ink-2:#161C3E;
+    --slab:#252C58;
+    --brass:#E8B84B;
+    --mint:#6FE3B4;
+    --rose:#FF6B8A;
+    --paper:#EDE8DC;
+    --dim:rgba(237,232,220,.45);
+    --serif: ui-serif, "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0;background:var(--ink);color:var(--paper);
+    font-family:var(--sans);overflow:hidden;overscroll-behavior:none;
+    -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;
+    touch-action:manipulation;}
+  #app{position:fixed;inset:0;display:flex;flex-direction:column;
+    padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);}
+  canvas{position:absolute;inset:0;width:100%;height:100%;display:block;z-index:0}
+
+  /* ---- HUD ---- */
+  #hud{position:relative;z-index:2;display:flex;align-items:baseline;gap:12px;
+    padding:14px 16px 10px;font-family:var(--mono);font-size:12px;letter-spacing:.08em;
+    text-transform:uppercase;color:var(--dim)}
+  #hud .grow{flex:1}
+  #score{font-size:22px;color:var(--paper);letter-spacing:0}
+  #score b{color:var(--brass);font-weight:600}
+  #tonicLbl{color:var(--paper);text-transform:none;letter-spacing:.02em;font-family:var(--serif);font-size:15px}
+  #readout{text-align:right;min-width:98px}
+  #noteLbl{display:block;font-size:17px;color:var(--paper);letter-spacing:.02em}
+  #centsLbl{display:block;font-size:11px;margin-top:2px}
+  #centsLbl.flat{color:var(--rose)} #centsLbl.sharp{color:var(--brass)} #centsLbl.on{color:var(--mint)}
+
+  /* ---- bottom controls ---- */
+  #panel{position:relative;z-index:2;margin-top:auto;padding:10px 12px 16px;
+    display:flex;flex-wrap:wrap;gap:8px;justify-content:center}
+  button{font:inherit;color:var(--paper);background:rgba(255,255,255,.06);
+    border:1px solid rgba(255,255,255,.14);border-radius:999px;padding:9px 14px;
+    font-size:13px;line-height:1;cursor:pointer;transition:background .15s,border-color .15s}
+  button:active{background:rgba(255,255,255,.14)}
+  button:focus-visible{outline:2px solid var(--brass);outline-offset:2px}
+  button.on{background:rgba(232,184,75,.16);border-color:var(--brass);color:var(--brass)}
+  button.icon{width:38px;padding:9px 0;text-align:center;font-family:var(--mono)}
+
+  /* ---- overlay ---- */
+  #overlay{position:absolute;inset:0;z-index:3;display:flex;align-items:center;justify-content:center;
+    padding:24px;background:rgba(11,14,34,.82);backdrop-filter:blur(6px)}
+  #overlay[hidden]{display:none}
+  #card{max-width:340px;text-align:center}
+  #eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--brass)}
+  #title{font-family:var(--serif);font-size:34px;line-height:1.08;margin:10px 0 8px;font-weight:500}
+  #body{font-size:14px;line-height:1.5;color:var(--dim);margin:0 0 20px}
+  #cta{background:var(--brass);border-color:var(--brass);color:#171207;font-weight:600;padding:13px 24px;font-size:15px}
+  #cta:active{background:#f0c65f}
+  @media (prefers-reduced-motion: reduce){*{animation:none!important}}
+</style>
+</head>
+<body>
+<div id="app">
+  <canvas id="game"></canvas>
+
+  <header id="hud">
+    <span id="score">0<b> / 8</b></span>
+    <span class="grow" style="text-align:center"><span id="tonicLbl">do = C3</span></span>
+    <span id="readout"><span id="noteLbl">—</span><span id="centsLbl">listening</span></span>
+  </header>
+
+  <div id="panel">
+    <button class="icon" id="down" aria-label="Lower do by a semitone">−</button>
+    <button id="calib">Set do from my voice</button>
+    <button class="icon" id="up" aria-label="Raise do by a semitone">+</button>
+    <button id="diff">Normal</button>
+    <button id="practice">Practice</button>
+  </div>
+
+  <div id="overlay">
+    <div id="card">
+      <div id="eyebrow">do re mi fa so la ti do</div>
+      <h1 id="title">Pitch Ladder</h1>
+      <p id="body">Sing to lift the ball. Each wall opens at one note of the scale — hold it steady to slip through.</p>
+      <button id="cta">Turn on the mic</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+'use strict';
+
+/* ---------------------------------------------------------------- setup */
+const $ = s => document.querySelector(s);
+const cv = $('#game'), ctx = cv.getContext('2d');
+const el = {
+  score:$('#score'), tonic:$('#tonicLbl'), note:$('#noteLbl'), cents:$('#centsLbl'),
+  overlay:$('#overlay'), eyebrow:$('#eyebrow'), title:$('#title'), body:$('#body'), cta:$('#cta'),
+  up:$('#up'), down:$('#down'), calib:$('#calib'), diff:$('#diff'), practice:$('#practice')
+};
+
+const DEGREES = [
+  {s:0,  n:'do'}, {s:2,  n:'re'}, {s:4, n:'mi'}, {s:5,  n:'fa'},
+  {s:7,  n:'so'}, {s:9,  n:'la'}, {s:11,n:'ti'}, {s:12, n:'do'}
+];
+const LOW = -3.5, HIGH = 15.5;          // semitones shown, relative to do
+const NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+
+const LEVELS = [
+  {name:'Gentle', tol:1.00, gapT:2.6, sp:0.26},
+  {name:'Normal', tol:0.70, gapT:2.0, sp:0.32},
+  {name:'Strict', tol:0.45, gapT:1.5, sp:0.40}
+];
+
+let W=0, H=0, top_=0, bot=0, ballX=0, BR=13;
+function layout(){
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const r = cv.getBoundingClientRect();
+  W = r.width; H = r.height;
+  cv.width = Math.round(W*dpr); cv.height = Math.round(H*dpr);
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  top_ = 78; bot = H - 92;
+  ballX = Math.round(W*0.30);
+  BR = Math.max(10, Math.min(15, W*0.034));
+}
+addEventListener('resize', layout);
+layout();
+
+const perSemi = () => (bot-top_)/(HIGH-LOW);
+const yFor = st => bot - ((st-LOW)/(HIGH-LOW))*(bot-top_);
+const noteName = m => NAMES[((Math.round(m)%12)+12)%12] + (Math.floor(Math.round(m)/12)-1);
+
+/* ------------------------------------------------------------- game state */
+const G = {
+  phase:'idle',          // idle | ready | playing | over | won
+  tonic:48,              // midi of "do"  (C3)
+  level:1,
+  practice:false,
+  walls:[], score:0, spawned:0,
+  ballY:0, vel:0, trail:[], flash:0, shake:0,
+  speed:0, gap:0
+};
+G.ballY = bot;
+
+function resetRun(){
+  const L = LEVELS[G.level];
+  G.speed = Math.max(95, W*L.sp*3.2);
+  G.gap   = G.speed*L.gapT;
+  G.walls = DEGREES.map((d,i)=>({ s:d.s, n:d.n, x: W+60 + i*G.gap, hit:false, pass:false }));
+  G.score = 0; G.trail.length = 0; G.vel = 0; G.ballY = bot; G.flash = 0; G.shake = 0;
+  paintHud();
+}
+
+function paintHud(){
+  el.score.innerHTML = G.score + '<b> / 8</b>';
+  el.tonic.textContent = 'do = ' + noteName(G.tonic);
+  el.diff.textContent = LEVELS[G.level].name;
+  el.practice.classList.toggle('on', G.practice);
+}
+
+function overlay(eyebrow, title, body, cta){
+  el.eyebrow.textContent = eyebrow; el.title.textContent = title;
+  el.body.textContent = body; el.cta.textContent = cta;
+  el.overlay.hidden = false;
+}
+
+/* ------------------------------------------------------------ audio input */
+let ac=null, analyser=null, raw=null, ds=null, nsdf=null;
+let freq=0, clarity=0, level=0, calibrating=null;
+const hist = [];
+
+function micBlockReason(){
+  if (!window.isSecureContext)
+    return ['Needs a secure page', 'Origin is ' + location.origin +
+      '. Browsers only hand over the mic on https:// or localhost.'];
+  if (!navigator.mediaDevices?.getUserMedia)
+    return ['No getUserMedia', 'This browser did not expose navigator.mediaDevices.getUserMedia at all.'];
+  const fp = document.featurePolicy || document.permissionsPolicy;
+  if (window.self !== window.top && fp && !fp.allowsFeature('microphone'))
+    return ['Blocked by the frame', 'This page is inside an iframe whose permissions policy withholds the mic. ' +
+      'Download the file and open it directly instead of previewing it.'];
+  return null;
+}
+
+async function initMic(){
+  const blocked = micBlockReason();
+  if (blocked){
+    overlay('microphone', blocked[0], blocked[1] + ' Fix that and reload.', 'Reload');
+    el.cta.onclick = () => location.reload();
+    return false;
+  }
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({audio:{
+      echoCancellation:false, noiseSuppression:false, autoGainControl:false, channelCount:1
+    }});
+    ac = new (window.AudioContext||window.webkitAudioContext)();
+    await ac.resume();
+    analyser = ac.createAnalyser();
+    analyser.fftSize = 4096;
+    ac.createMediaStreamSource(stream).connect(analyser);
+    raw  = new Float32Array(analyser.fftSize);
+    ds   = new Float32Array(analyser.fftSize>>1);
+    nsdf = new Float32Array(1200);
+    return true;
+  }catch(e){
+    const why = {
+      NotAllowedError:  'Permission was denied. Tap the lock icon in the address bar → Permissions → Microphone → Allow. On Android also check Settings → Apps → Chrome → Permissions → Microphone.',
+      NotFoundError:    'No input device was found.',
+      NotReadableError: 'The OS handed back the device but could not open it — another app probably holds the mic. Close it and retry.',
+      OverconstrainedError: 'The device rejected the audio constraints.',
+      SecurityError:    'The browser refused on security grounds despite a secure context.'
+    }[e.name] || (e.name + ': ' + e.message);
+    overlay('microphone', 'Mic did not open', why, 'Try again');
+    el.cta.onclick = start;
+    return false;
+  }
+}
+
+/* McLeod-style normalised autocorrelation — cheap enough for a phone loop */
+function detect(){
+  analyser.getFloatTimeDomainData(raw);
+  const N = ds.length;
+  let mean = 0;
+  for (let i=0;i<N;i++){ const v = (raw[2*i]+raw[2*i+1])*0.5; ds[i]=v; mean+=v; }
+  mean /= N;
+  let rms = 0;
+  for (let i=0;i<N;i++){ ds[i]-=mean; rms += ds[i]*ds[i]; }
+  level = rms = Math.sqrt(rms/N);
+  if (rms < 0.006) return 0;
+
+  const sr = ac.sampleRate/2;
+  const minLag = Math.max(2, Math.floor(sr/1100));
+  const maxLag = Math.min(nsdf.length-2, Math.floor(sr/65));
+  const w = Math.min(N - maxLag, 900);
+  if (w < 128) return 0;
+
+  let gmax = 0;
+  for (let lag=minLag; lag<=maxLag; lag++){
+    let num=0, den=0;
+    for (let i=0;i<w;i++){ const a=ds[i], b=ds[i+lag]; num += a*b; den += a*a + b*b; }
+    const v = den>0 ? 2*num/den : 0;
+    nsdf[lag] = v;
+    if (v > gmax) gmax = v;
+  }
+  if (gmax < 0.45) return 0;
+
+  const thr = gmax*0.9;
+  let peak = -1;
+  for (let lag=minLag+1; lag<maxLag; lag++){
+    if (nsdf[lag] > nsdf[lag-1] && nsdf[lag] >= nsdf[lag+1] && nsdf[lag] >= thr){ peak = lag; break; }
+  }
+  if (peak < 0) return 0;
+
+  const y0=nsdf[peak-1], y1=nsdf[peak], y2=nsdf[peak+1];
+  const den = y0 - 2*y1 + y2;
+  let sh = den !== 0 ? 0.5*(y0-y2)/den : 0;
+  if (sh < -1 || sh > 1) sh = 0;
+  clarity = y1;
+  return sr/(peak+sh);
+}
+
+/* median of the last 3 readings kills most octave flickers */
+function smoothed(){
+  const f = detect();
+  if (f > 0) hist.push(69 + 12*Math.log2(f/440)); else hist.push(null);
+  if (hist.length > 3) hist.shift();
+  const v = hist.filter(x => x !== null);
+  if (v.length < 2) return 0;
+  v.sort((a,b)=>a-b);
+  const midi = v.length === 3 ? v[1] : (v[0]+v[1])/2;
+  freq = 440*Math.pow(2,(midi-69)/12);
+  return midi;
+}
+
+/* ------------------------------------------------------------------ loop */
+let last = performance.now();
+function frame(now){
+  const dt = Math.min(0.05, (now-last)/1000); last = now;
+  const midi = ac ? smoothed() : 0;
+  readout(midi);
+  if (calibrating) runCalibration(midi, now);
+  if (G.phase === 'playing') step(dt, midi);
+  else if (midi) glide(dt, midi);
+  draw(now);
+  requestAnimationFrame(frame);
+}
+
+function readout(midi){
+  if (!midi){ el.note.textContent='—'; el.cents.textContent = ac?'quiet':'listening'; el.cents.className=''; return; }
+  const cents = Math.round((midi - Math.round(midi))*100);
+  el.note.textContent = noteName(midi);
+  el.cents.textContent = (cents>0?'+':'') + cents + '\u00A2';
+  el.cents.className = Math.abs(cents) <= 12 ? 'on' : (cents<0 ? 'flat' : 'sharp');
+}
+
+function glide(dt, midi){
+  const t = yFor(Math.max(LOW, Math.min(HIGH, midi - G.tonic)));
+  G.ballY += (t - G.ballY)*(1 - Math.exp(-dt*16));
+}
+
+function step(dt, midi){
+  if (midi) glide(dt, midi);
+  else {
+    G.vel += 1100*dt;
+    G.ballY = Math.min(bot, G.ballY + G.vel*dt);
+    if (G.ballY >= bot) G.vel = 0;
+  }
+  G.ballY = Math.max(top_, Math.min(bot, G.ballY));
+
+  G.trail.push({t:performance.now(), y:G.ballY});
+  while (G.trail.length && performance.now() - G.trail[0].t > 1800) G.trail.shift();
+
+  const tolPx = LEVELS[G.level].tol * perSemi();
+  const WT = 15;
+  for (const w of G.walls){
+    w.x -= G.speed*dt;
+    const overlapping = w.x < ballX + BR && w.x + WT > ballX - BR;
+    if (!w.hit && overlapping && Math.abs(G.ballY - yFor(w.s)) > tolPx){
+      w.hit = true; G.shake = 1;
+      if (!G.practice) return fail(w);
+    }
+    if (!w.pass && !w.hit && w.x + WT < ballX - BR){
+      w.pass = true; G.score++; G.flash = 1; paintHud();
+    }
+  }
+  if (G.walls[G.walls.length-1].x + WT < -20) finish();
+}
+
+function fail(w){
+  G.phase = 'over';
+  overlay('missed at ' + w.n, 'The ball slipped',
+    'That wall opened at ' + w.n + ' — ' + noteName(G.tonic + w.s) +
+    '. Nudge do until the scale sits in your range, or drop to Gentle.', 'Try again');
+}
+function finish(){
+  G.phase = 'won';
+  const all = G.score === 8;
+  overlay(all ? 'cleared' : G.score + ' of 8',
+    all ? 'Top of the ladder' : 'Ladder run over',
+    all ? 'Every wall on the first pass. Try Strict, or move do up a few semitones.'
+        : 'Practice mode keeps the ball moving through misses if you want to drill one note.',
+    'Run it again');
+}
+
+/* ------------------------------------------------------------------ draw */
+function draw(now){
+  const sx = G.shake ? (Math.random()-0.5)*8*G.shake : 0;
+  G.shake = Math.max(0, G.shake - 0.06);
+  G.flash = Math.max(0, G.flash - 0.05);
+
+  const g = ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,'#0B0E22'); g.addColorStop(1,'#191F45');
+  ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+  ctx.save(); ctx.translate(sx,0);
+
+  const next = G.walls.find(w => !w.pass && !w.hit);
+
+  // staff: one faint rule per scale degree, the live target lit in brass
+  ctx.lineWidth = 1;
+  for (const d of DEGREES){
+    const y = yFor(d.s), live = next && next.s === d.s;
+    ctx.strokeStyle = live ? 'rgba(232,184,75,.38)' : 'rgba(237,232,220,.07)';
+    ctx.beginPath(); ctx.moveTo(0,y+.5); ctx.lineTo(W,y+.5); ctx.stroke();
+    ctx.font = (live ? '600 ' : '') + '13px ' + getComputedStyle(document.body).getPropertyValue('--serif');
+    ctx.fillStyle = live ? '#E8B84B' : 'rgba(237,232,220,.30)';
+    ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
+    ctx.fillText(d.n, 8, y);
+  }
+
+  // walls
+  const tolPx = LEVELS[G.level].tol*perSemi(), WT = 15;
+  for (const w of G.walls){
+    if (w.x > W+40 || w.x < -60) continue;
+    const hy = yFor(w.s);
+    ctx.fillStyle = w.hit ? 'rgba(255,107,138,.55)' : '#252C58';
+    ctx.fillRect(w.x, top_-40, WT, (hy-tolPx)-(top_-40));
+    ctx.fillRect(w.x, hy+tolPx, WT, (bot+40)-(hy+tolPx));
+    ctx.fillStyle = w.hit ? '#FF6B8A' : '#E8B84B';
+    ctx.fillRect(w.x, hy-tolPx-2.5, WT, 2.5);
+    ctx.fillRect(w.x, hy+tolPx, WT, 2.5);
+    ctx.save();
+    ctx.translate(w.x + WT/2, hy - tolPx - 16);
+    ctx.font = '600 12px ' + getComputedStyle(document.body).getPropertyValue('--serif');
+    ctx.fillStyle = 'rgba(237,232,220,.65)'; ctx.textAlign='center'; ctx.textBaseline='alphabetic';
+    ctx.fillText(w.n, 0, 0);
+    ctx.restore();
+  }
+
+  // the signature: your last ~2s of pitch, drawn as a ribbon behind the ball
+  if (G.trail.length > 1){
+    ctx.lineWidth = 2.5; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    for (let i=1;i<G.trail.length;i++){
+      const a = G.trail[i-1], b = G.trail[i];
+      const age = (now - b.t)/1800;
+      ctx.strokeStyle = 'rgba(111,227,180,' + (0.5*(1-age)).toFixed(3) + ')';
+      ctx.beginPath();
+      ctx.moveTo(ballX - (now-a.t)*0.075, a.y);
+      ctx.lineTo(ballX - (now-b.t)*0.075, b.y);
+      ctx.stroke();
+    }
+  }
+
+  // ball
+  const aligned = next && Math.abs(G.ballY - yFor(next.s)) <= tolPx;
+  const col = G.shake > 0.2 ? '#FF6B8A' : aligned ? '#6FE3B4' : '#EDE8DC';
+  ctx.shadowColor = col; ctx.shadowBlur = 18 + G.flash*26;
+  ctx.fillStyle = col;
+  ctx.beginPath(); ctx.arc(ballX, G.ballY, BR, 0, Math.PI*2); ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // mic level, a thin bar at the very bottom
+  ctx.fillStyle = 'rgba(237,232,220,.22)';
+  ctx.fillRect(0, H-3, Math.min(W, level*12*W), 3);
+  ctx.restore();
+}
+
+/* --------------------------------------------------------------- controls */
+async function start(){
+  if (!ac){ el.cta.disabled = true; const ok = await initMic(); el.cta.disabled = false; if (!ok) return; }
+  el.overlay.hidden = true;
+  resetRun();
+  G.phase = 'playing';
+}
+el.cta.onclick = start;
+
+el.up.onclick   = () => { G.tonic = Math.min(72, G.tonic+1); paintHud(); };
+el.down.onclick = () => { G.tonic = Math.max(33, G.tonic-1); paintHud(); };
+el.diff.onclick = () => { G.level = (G.level+1)%LEVELS.length; paintHud(); if (G.phase==='playing') resetRun(); };
+el.practice.onclick = () => { G.practice = !G.practice; paintHud(); };
+
+el.calib.onclick = async () => {
+  if (!ac){ const ok = await initMic(); if (!ok) return; }
+  calibrating = {until: performance.now()+2500, notes:[]};
+  el.calib.textContent = 'Hold a note…';
+  el.calib.classList.add('on');
+};
+function runCalibration(midi, now){
+  if (midi) calibrating.notes.push(midi);
+  if (now < calibrating.until) return;
+  const n = calibrating.notes.sort((a,b)=>a-b);
+  if (n.length > 8) G.tonic = Math.max(33, Math.min(72, Math.round(n[n.length>>1])));
+  calibrating = null;
+  el.calib.textContent = n.length > 8 ? 'Set do from my voice' : 'Nothing heard — try again';
+  el.calib.classList.remove('on');
+  paintHud();
+}
+
+addEventListener('keydown', e => {
+  if (e.code === 'Space' && !el.overlay.hidden){ e.preventDefault(); start(); }
+});
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && G.phase === 'playing'){
+    G.phase = 'over';
+    overlay('paused', 'Left the ladder', 'The run stops when the tab loses focus.', 'Start over');
+  }
+});
+
+paintHud();
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
