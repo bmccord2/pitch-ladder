@@ -35,6 +35,7 @@
   #hud .grow{flex:1}
   #score{font-size:22px;color:var(--paper);letter-spacing:0}
   #score b{color:var(--brass);font-weight:600}
+  #score i{font-style:normal;font-family:var(--mono);font-size:12px;color:var(--dim);margin-left:9px}
   #tonicLbl{color:var(--paper);text-transform:none;letter-spacing:.02em;font-family:var(--serif);font-size:15px}
   #readout{text-align:right;min-width:98px}
   #noteLbl{display:block;font-size:17px;color:var(--paper);letter-spacing:.02em}
@@ -80,14 +81,14 @@
     <button id="calib">Set do from my voice</button>
     <button class="icon" id="up" aria-label="Raise do by a semitone">+</button>
     <button id="diff">Normal</button>
-    <button id="practice">Practice</button>
+    <button id="practice">Warm up</button>
   </div>
 
   <div id="overlay">
     <div id="card">
       <div id="eyebrow">do re mi fa so la ti do</div>
       <h1 id="title">Pitch Ladder</h1>
-      <p id="body">Sing to lift the ball. Each wall opens at one note of the scale — hold it steady to slip through.</p>
+      <p id="body">Sing to lift the ball. Each wall opens at one note of the scale and holds you there until you find it, so the clock is the only score.</p>
       <button id="cta">Turn on the mic</button>
     </div>
   </div>
@@ -139,12 +140,12 @@ const noteName = m => NAMES[((Math.round(m)%12)+12)%12] + (Math.floor(Math.round
 
 /* ------------------------------------------------------------- game state */
 const G = {
-  phase:'idle',          // idle | ready | playing | over | won
+  phase:'idle',          // idle | ready | playing | won
   tonic:48,              // midi of "do"  (C3)
   level:1,
-  practice:false,
-  walls:[], score:0, spawned:0,
-  ballY:0, vel:0, trail:[], flash:0, shake:0,
+  warmup:false,
+  walls:[], score:0, time:0,
+  ballY:0, vel:0, trail:[], flash:0, stall:0, push:0,
   speed:0, gap:0
 };
 G.ballY = bot;
@@ -153,16 +154,22 @@ function resetRun(){
   const L = LEVELS[G.level];
   G.speed = Math.max(95, W*L.sp*3.2);
   G.gap   = G.speed*L.gapT;
-  G.walls = DEGREES.map((d,i)=>({ s:d.s, n:d.n, x: W+60 + i*G.gap, hit:false, pass:false }));
-  G.score = 0; G.trail.length = 0; G.vel = 0; G.ballY = bot; G.flash = 0; G.shake = 0;
-  paintHud();
+  G.walls = DEGREES.map((d,i)=>({ s:d.s, n:d.n, x: W+80 + i*G.gap, pass:false }));
+  G.score = 0; G.time = 0; G.trail.length = 0; G.vel = 0;
+  G.ballY = yFor(0); G.flash = 0; G.stall = 0; G.push = 0;
+  paintHud(true);
 }
 
-function paintHud(){
-  el.score.innerHTML = G.score + '<b> / 8</b>';
+let shownTime = -1;
+function paintHud(force){
+  const t = G.time.toFixed(1);
+  if (force || t !== shownTime){
+    shownTime = t;
+    el.score.innerHTML = G.score + '<b> / 8</b><i>' + t + 's</i>';
+  }
   el.tonic.textContent = 'do = ' + noteName(G.tonic);
   el.diff.textContent = LEVELS[G.level].name;
-  el.practice.classList.toggle('on', G.practice);
+  el.practice.classList.toggle('on', G.warmup);
 }
 
 function overlay(eyebrow, title, body, cta){
@@ -308,59 +315,64 @@ function glide(dt, midi){
 function step(dt, midi){
   if (midi) glide(dt, midi);
   else {
-    G.vel += 1100*dt;
+    G.vel += 900*dt;
     G.ballY = Math.min(bot, G.ballY + G.vel*dt);
     if (G.ballY >= bot) G.vel = 0;
   }
   G.ballY = Math.max(top_, Math.min(bot, G.ballY));
 
+  G.time += dt;
   G.trail.push({t:performance.now(), y:G.ballY});
   while (G.trail.length && performance.now() - G.trail[0].t > 1800) G.trail.shift();
+  paintHud();
 
-  const tolPx = LEVELS[G.level].tol * perSemi();
-  const WT = 15;
-  for (const w of G.walls){
-    w.x -= G.speed*dt;
-    const overlapping = w.x < ballX + BR && w.x + WT > ballX - BR;
-    if (!w.hit && overlapping && Math.abs(G.ballY - yFor(w.s)) > tolPx){
-      w.hit = true; G.shake = 1;
-      if (!G.practice) return fail(w);
-    }
-    if (!w.pass && !w.hit && w.x + WT < ballX - BR){
-      w.pass = true; G.score++; G.flash = 1; paintHud();
-    }
+  if (G.warmup) return;
+
+  const tolPx = LEVELS[G.level].tol*perSemi(), WT = 15;
+  const active = G.walls.find(w => !w.pass);
+  if (!active) return finish();
+
+  const hy = yFor(active.s);
+  const want = G.speed*dt;
+  const inside  = active.x < ballX + BR && active.x + WT > ballX - BR;
+  const aligned = Math.abs(G.ballY - hy) <= tolPx;
+
+  // the wall is solid: it can't advance past the ball unless the ball is in the gap
+  let delta = want;
+  if (!inside && !aligned && active.x - delta < ballX + BR)
+    delta = Math.max(0, active.x - (ballX + BR));
+
+  if (delta < want*0.5){ G.stall += dt; G.push = Math.min(1, G.push + dt*7); }
+  else { G.stall = 0; G.push = Math.max(0, G.push - dt*7); }
+
+  for (const w of G.walls) w.x -= delta;
+
+  // while threading the gap the wall physically pens the ball in
+  if (active.x < ballX + BR && active.x + WT > ballX - BR)
+    G.ballY = Math.max(hy - tolPx, Math.min(hy + tolPx, G.ballY));
+
+  if (active.x + WT < ballX - BR){
+    active.pass = true; G.score++; G.flash = 1; G.stall = 0; paintHud(true);
   }
-  if (G.walls[G.walls.length-1].x + WT < -20) finish();
 }
 
-function fail(w){
-  G.phase = 'over';
-  overlay('missed at ' + w.n, 'The ball slipped',
-    'That wall opened at ' + w.n + ' — ' + noteName(G.tonic + w.s) +
-    '. Nudge do until the scale sits in your range, or drop to Gentle.', 'Try again');
-}
 function finish(){
   G.phase = 'won';
-  const all = G.score === 8;
-  overlay(all ? 'cleared' : G.score + ' of 8',
-    all ? 'Top of the ladder' : 'Ladder run over',
-    all ? 'Every wall on the first pass. Try Strict, or move do up a few semitones.'
-        : 'Practice mode keeps the ball moving through misses if you want to drill one note.',
+  overlay('cleared in ' + G.time.toFixed(1) + 's', 'Top of the ladder',
+    'You can\'t lose a run — walls just hold you until you find the note. The clock is the score, so the way to get better is to get faster.',
     'Run it again');
 }
 
 /* ------------------------------------------------------------------ draw */
 function draw(now){
-  const sx = G.shake ? (Math.random()-0.5)*8*G.shake : 0;
-  G.shake = Math.max(0, G.shake - 0.06);
   G.flash = Math.max(0, G.flash - 0.05);
 
   const g = ctx.createLinearGradient(0,0,0,H);
   g.addColorStop(0,'#0B0E22'); g.addColorStop(1,'#191F45');
   ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
-  ctx.save(); ctx.translate(sx,0);
 
-  const next = G.walls.find(w => !w.pass && !w.hit);
+  const next = G.warmup ? null : G.walls.find(w => !w.pass);
+  const stuck = G.stall > 0.35;
 
   // staff: one faint rule per scale degree, the live target lit in brass
   ctx.lineWidth = 1;
@@ -377,20 +389,17 @@ function draw(now){
   // walls
   const tolPx = LEVELS[G.level].tol*perSemi(), WT = 15;
   for (const w of G.walls){
-    if (w.x > W+40 || w.x < -60) continue;
-    const hy = yFor(w.s);
-    ctx.fillStyle = w.hit ? 'rgba(255,107,138,.55)' : '#252C58';
+    if (w.pass || w.x > W+40 || w.x < -60) continue;
+    const hy = yFor(w.s), rim = (w === next && stuck) ? '#FF6B8A' : '#E8B84B';
+    ctx.fillStyle = '#252C58';
     ctx.fillRect(w.x, top_-40, WT, (hy-tolPx)-(top_-40));
     ctx.fillRect(w.x, hy+tolPx, WT, (bot+40)-(hy+tolPx));
-    ctx.fillStyle = w.hit ? '#FF6B8A' : '#E8B84B';
+    ctx.fillStyle = rim;
     ctx.fillRect(w.x, hy-tolPx-2.5, WT, 2.5);
     ctx.fillRect(w.x, hy+tolPx, WT, 2.5);
-    ctx.save();
-    ctx.translate(w.x + WT/2, hy - tolPx - 16);
     ctx.font = '600 12px ' + getComputedStyle(document.body).getPropertyValue('--serif');
     ctx.fillStyle = 'rgba(237,232,220,.65)'; ctx.textAlign='center'; ctx.textBaseline='alphabetic';
-    ctx.fillText(w.n, 0, 0);
-    ctx.restore();
+    ctx.fillText(w.n, w.x + WT/2, hy - tolPx - 16);
   }
 
   // the signature: your last ~2s of pitch, drawn as a ribbon behind the ball
@@ -407,18 +416,25 @@ function draw(now){
     }
   }
 
-  // ball
+  // ball — shoved back a little while a wall is holding it
+  const bx = ballX - G.push*7;
   const aligned = next && Math.abs(G.ballY - yFor(next.s)) <= tolPx;
-  const col = G.shake > 0.2 ? '#FF6B8A' : aligned ? '#6FE3B4' : '#EDE8DC';
+  const col = stuck ? '#FF6B8A' : aligned ? '#6FE3B4' : '#EDE8DC';
   ctx.shadowColor = col; ctx.shadowBlur = 18 + G.flash*26;
   ctx.fillStyle = col;
-  ctx.beginPath(); ctx.arc(ballX, G.ballY, BR, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(bx, G.ballY, BR, 0, Math.PI*2); ctx.fill();
   ctx.shadowBlur = 0;
+
+  // after a couple of seconds pinned, say which note opens the gate
+  if (next && G.stall > 1.6){
+    ctx.font = '15px ' + getComputedStyle(document.body).getPropertyValue('--serif');
+    ctx.fillStyle = 'rgba(237,232,220,.7)'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    ctx.fillText('sing ' + next.n + ' — ' + noteName(G.tonic + next.s), bx - BR - 12, G.ballY);
+  }
 
   // mic level, a thin bar at the very bottom
   ctx.fillStyle = 'rgba(237,232,220,.22)';
   ctx.fillRect(0, H-3, Math.min(W, level*12*W), 3);
-  ctx.restore();
 }
 
 /* --------------------------------------------------------------- controls */
@@ -432,8 +448,8 @@ el.cta.onclick = start;
 
 el.up.onclick   = () => { G.tonic = Math.min(72, G.tonic+1); paintHud(); };
 el.down.onclick = () => { G.tonic = Math.max(33, G.tonic-1); paintHud(); };
-el.diff.onclick = () => { G.level = (G.level+1)%LEVELS.length; paintHud(); if (G.phase==='playing') resetRun(); };
-el.practice.onclick = () => { G.practice = !G.practice; paintHud(); };
+el.diff.onclick = () => { G.level = (G.level+1)%LEVELS.length; paintHud(true); if (G.phase==='playing') resetRun(); };
+el.practice.onclick = () => { G.warmup = !G.warmup; paintHud(true); if (G.phase==='playing') resetRun(); };
 
 el.calib.onclick = async () => {
   if (!ac){ const ok = await initMic(); if (!ok) return; }
@@ -457,8 +473,9 @@ addEventListener('keydown', e => {
 });
 document.addEventListener('visibilitychange', () => {
   if (document.hidden && G.phase === 'playing'){
-    G.phase = 'over';
-    overlay('paused', 'Left the ladder', 'The run stops when the tab loses focus.', 'Start over');
+    G.phase = 'paused';
+    overlay('paused', 'Ball on hold', 'The clock stops while this tab is in the background.', 'Resume');
+    el.cta.onclick = () => { el.overlay.hidden = true; G.phase = 'playing'; el.cta.onclick = start; };
   }
 });
 
